@@ -1,0 +1,112 @@
+# [AK] nsq_custom_data is passe to the module as value of var.nsq_custom_data 
+
+locals {
+  nsq_custom_data = <<CUSTOM_DATA
+#!/bin/sh
+groupadd nsq -g 1010
+mkdir /usr/local/nsq/
+sudo adduser --system --home /usr/local/nsq/ --uid 1010 nsq
+chown nsq:nsq /usr/local/nsq/ 
+mkdir /usr/local/nsq/bin
+chown nsq:nsq /usr/local/nsq/bin
+mkdir /nsqdata
+mkdir /usr/local/nsq/cache
+sudo wget https://s3.amazonaws.com/bitly-downloads/nsq/nsq-1.3.0.linux-amd64.go1.21.5.tar.gz -P /usr/local/nsq/bin/ 
+sudo wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -P /usr/local/nsq/
+sudo dpkg -i /usr/local/nsq/packages-microsoft-prod.deb
+sudo apt-get update -y
+sudo apt-get install libfuse3-dev fuse3 -y
+sudo apt-get install blobfuse2 -y
+
+
+cat <<EOF >> /usr/local/nsq/blobconfig.yaml
+allow-other: true
+
+file_cache:
+  path: /usr/local/nsq/cache
+
+azstorage:
+  account-name: ${var.storage_account}
+  container: ${azurerm_storage_container.nsq_blob_container.name}
+  endpoint: https://${var.storage_account}.blob.core.windows.net
+  mode: key
+  account-key: ${data.azurerm_key_vault_secret.storage_key.value}s
+EOF
+
+cat <<EOF >> /etc/systemd/system/nsqlookupd.service
+[Unit]
+Description=NSQLookupD
+After=network.target
+
+[Service]
+WorkingDirectory=/usr/local/nsq
+ExecStart=/usr/local/nsq/bin/nsqlookupd \
+  -tcp-address 0.0.0.0:4160 \
+  -http-address 0.0.0.0:4161
+ExecReload=/bin/kill -HUP $MAINPID
+Type=simple
+KillMode=process
+Restart=on-failure
+RestartSec=10s
+User=nsq
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat <<EOF >> /etc/systemd/system/nsqd.service
+[Unit]
+Description=NSQD
+After=network.target
+
+[Service]
+WorkingDirectory=/usr/local/nsq
+ExecStart=/usr/local/nsq/bin/nsqd \
+  -lookupd-tcp-address   127.0.0.1:4160 \
+  -http-address 0.0.0.0:4151 \
+  -tcp-address 0.0.0.0:4150 \
+  -mem-queue-size 100 \
+  -data-path /nsqdata \
+  -e2e-processing-latency-percentile '0.5,0.75,0.95,1' \
+  -e2e-processing-latency-window-time '60m'
+ExecReload=/bin/kill -HUP $MAINPID
+LimitNOFILE=65535
+Type=simple
+KillMode=process
+Restart=on-failure
+RestartSec=10s
+User=nsq
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat <<EOF >> /etc/systemd/system/nsqadmin.service
+[Unit]
+Description=NSQD Admin
+After=network.target
+
+[Service]
+WorkingDirectory=/usr/local/nsq
+ExecStart=/usr/local/nsq/bin/nsqadmin \
+  -lookupd-http-address   127.0.0.1:4161 \
+  -http-address 0.0.0.0:4171
+ExecReload=/bin/kill -HUP $MAINPID
+Type=simple
+KillMode=process
+Restart=on-failure
+RestartSec=10s
+User=nsq
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo blobfuse2 mount /nsqdata --config-file=/usr/local/nsq/blobconfig.yaml
+sudo tar -xf /usr/local/nsq/bin/nsq-1.3.0.linux-amd64.go1.21.5.tar.gz --strip-components=2 --directory /usr/local/nsq/bin/ 
+sudo systemctl restart nsqlookupd
+sudo systemctl restart nsqd
+sudo systemctl restart nsqadmin
+
+CUSTOM_DATA  
+}
+
